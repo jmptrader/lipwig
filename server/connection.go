@@ -117,6 +117,7 @@ var ping []byte = []byte(respEvent + ". " + ssmp.PING + "\n")
 
 func (c *Connection) readLoop(d *Dispatcher) {
 	defer d.RemoveConnection(c)
+	defer c.Cleanup()
 	idle := false
 	for !c.isClosed() {
 		c.c.SetReadDeadline(time.Now().Add(30 * time.Second))
@@ -177,8 +178,30 @@ func (c *Connection) Close() {
 	if !atomic.CompareAndSwapInt32(&c.closed, 0, 1) {
 		return
 	}
-	for _, t := range c.sub {
-		t.Unsubscribe(c)
-	}
 	c.c.Close()
+}
+
+// Cleanup logic, called from the read goroutine to avoid races
+func (c *Connection) Cleanup() {
+	if len(c.sub) == 0 {
+		return
+	}
+	buf := make([]byte, 18+len(c.User)+ssmp.MaxIdentifierLength)
+	copy(buf[:], "000 ")
+	copy(buf[4:], c.User)
+	copy(buf[4+len(c.User):], " UNSUBSCRIBE ")
+	for n, t := range c.sub {
+		if !t.Unsubscribe(c) {
+			continue
+		}
+		copy(buf[17+len(c.User):], n)
+		buf[17+len(c.User)+len(n)] = '\n'
+		event := buf[0 : 18+len(c.User)+len(n)]
+		t.ForAll(func(cc *Connection, wantsPresence bool) {
+			if wantsPresence {
+				cc.Write(event)
+			}
+		})
+	}
+	c.sub = nil
 }
